@@ -3,19 +3,20 @@
 
 import paho.mqtt.client as mqtt
 import http.client
+import ssl
 import json
 import re
 
+from config import config
 from orion_json_format import OrionJSONFormat
 
-# MQTT
-broker = '127.0.0.1'
-port = 1883
-topic = 'application/+/#'
-client_id = 'python-mqtt-1'
-
 # HTTP
-header = {'Content-type': 'application/json'}
+header1 = {}
+header2 = { 'Content-type': 'application/json' }
+
+if config['access_token'] != None and config['access_token'] != '':
+    header1['Authorization'] = 'Bearer ' + config['access_token']
+    header2['Authorization'] = 'Bearer ' + config['access_token']
 
 def connect_mqtt() -> mqtt:
 
@@ -26,35 +27,52 @@ def connect_mqtt() -> mqtt:
         else:
             print('Failed to connect, return code %d\n', rc)
 
-    client = mqtt.Client(client_id)
+    client = mqtt.Client(config['mqtt_client_id'])
     #client.username_pw_set(username, password)
     client.on_connect = on_connect
-    client.connect(broker, port)
+
+    if config['mqtt_tls'] == True:
+        client.tls_set(config['mqtt_ca_cert'], certfile = config['mqtt_tls_cert'], keyfile = config['mqtt_tls_key'])
+        client.tls_insecure_set(config['mqtt_tls_insecure'])
+
+    client.connect(config['mqtt_broker'], config['mqtt_port'])
     return client
 
 def subscribe(client: mqtt):
 
     def on_message(client, userdata, msg):
 
-        if re.match('^application/[0-9]*/device/[a-zA-Z0-9]*/event/up$', msg.topic) != None:
+        if re.match(config['topic_regex'], msg.topic) != None:
 
             payload = json.loads(msg.payload.decode())
             ojf = OrionJSONFormat()
-            http_conn = http.client.HTTPConnection('127.0.0.1:1026')
+            http_conn = None
 
-            http_conn.request('GET', '/v2/entities/' + payload['devEUI'])
+            if config['https'] == True and config['unverified'] == True:
+
+                http_conn = http.client.HTTPSConnection(config['orion_address'], context = ssl._create_unverified_context())
+
+            elif config['https'] == True and config['unverified'] == False:
+
+                http_conn = http.client.HTTPSConnection(config['orion_address'])
+
+            else:
+
+                http_conn = http.client.HTTPConnection(config['orion_address'])
+
+            http_conn.request('GET', '/v2/entities/' + payload['devEUI'], headers=header1)
             res = json.loads(http_conn.getresponse().read().decode())
 
             if res.get('error') != None and res.get('error') == 'NotFound':
                 body = json.dumps(ojf.encode_post(payload))
-                http_conn.request('POST', '/v2/entities', body, header)
+                http_conn.request('POST', '/v2/entities', body, header2)
             else:
                 body = json.dumps(ojf.encode_put(payload))
-                http_conn.request('PUT', '/v2/entities/' + payload['devEUI'] + '/attrs/data', body, header)
+                http_conn.request('PUT', '/v2/entities/' + payload['devEUI'] + '/attrs/data', body, header2)
 
             http_conn.close()
 
-    client.subscribe(topic)
+    client.subscribe(config['mqtt_topic'])
     client.on_message = on_message
 
 if __name__ == '__main__':
